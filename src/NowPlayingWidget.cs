@@ -184,6 +184,13 @@ namespace TileDesk
 
         private const int HoverNone = 0, HoverPrev = 1, HoverPlay = 2, HoverNext = 3, HoverBar = 4;
 
+        // ---- 底部长条：播放器面板在左，频谱画在同一条长条上 ----
+        // 为什么要合并：磁贴墙的淡出是整块位图的整体透明度（SourceConstantAlpha），
+        // 墙上没法"卡片淡出、频谱留着"。搬进播放器窗口（独立分层窗口）就都解决了。
+        public Action<Graphics, Rectangle> SpectrumPainter;   // 频谱绘制（由磁贴墙注入）
+        public bool SpectrumActive;                            // 有声音在放 → 驱动快速重绘
+        private int panelW, panelH, panelOffX, panelOffY;
+
         public NowPlayingWindow(NowPlayingMonitor monitor, Config config, float dpiScale)
         {
             mon = monitor;
@@ -196,9 +203,17 @@ namespace TileDesk
             BackColor = Color.Black;
             AutoScaleMode = AutoScaleMode.None;
 
+            // 长条 = 面板 + 四周留白。这样面板的屏幕位置和原来**完全一样**
+            // （长条左上角往左上挪一个 margin），时钟/信息条的对齐不用改。
             int w = Math.Max(320, (int)Math.Round(cfg.npWidth * scale));
             int h = Math.Max(44, (int)Math.Round(cfg.npHeight * scale));
-            ClientSize = new Size(w, h);
+            int m = Math.Max(4, (int)Math.Round(cfg.npMargin * scale));
+            panelW = w; panelH = h; panelOffX = m; panelOffY = m;
+            int sw = SystemInformation.WorkingArea.Width;
+            if (sw < w + m * 2) sw = w + m * 2;
+            ClientSize = new Size(sw, h + m * 2);
+            Config.Log("播放器长条: ClientSize=" + ClientSize.Width + "x" + ClientSize.Height +
+                       "  面板=" + panelW + "x" + panelH + "  偏移=" + panelOffX + "," + panelOffY);
             Relayout();
 
             tick = new Timer();
@@ -209,10 +224,18 @@ namespace TileDesk
 
         protected override bool ShowWithoutActivation { get { return true; } }
 
+        /// <summary>面板左上角的屏幕坐标。长条比面板大一圈，外部要按面板对齐时用这个。</summary>
+        public Point PanelScreenLocation
+        {
+            get { return new Point(Location.X + panelOffX, Location.Y + panelOffY); }
+        }
+
         /// <summary>进度条中线在窗口内的 y（用来让右下角信息条和它对齐）。拿不到返回 -1。</summary>
         public int BarCenterY
         {
-            get { return rBar.IsEmpty ? -1 : rBar.Y + rBar.Height / 2; }
+            // 注意减掉 panelOffY：调用方是拿它跟"面板的屏幕位置"做对齐的，
+            // 而 rBar 是长条坐标系里的（比面板多一个 margin 的偏移）。不减会多算一次。
+            get { return rBar.IsEmpty ? -1 : rBar.Y + rBar.Height / 2 - panelOffY; }
         }
 
         protected override CreateParams CreateParams
@@ -260,15 +283,16 @@ namespace TileDesk
             if (!shown)
             {
                 shown = true;
-                Location = location;
+                Location = new Point(location.X - panelOffX, location.Y - panelOffY);
                 Show();
                 lastVisQ = -1;
                 lastSec = -1;
                 dirty = true;
             }
-            else if (Location != location)
+            else
             {
-                Location = location;
+                Point wantLoc = new Point(location.X - panelOffX, location.Y - panelOffY);
+                if (Location != wantLoc) Location = wantLoc;
             }
 
             // 层级：把**墙**插到自己下面（= 自己在墙上面）。
@@ -288,6 +312,18 @@ namespace TileDesk
         private void Pump()
         {
             if (!shown || mon == null || IsDisposed) return;
+
+            // 频谱在跑：每帧都在变，重绘提到 ~8ms（60fps+）；否则 33ms 足够。
+            if (tick != null)
+            {
+                int want = SpectrumActive ? 8 : 33;
+                if (tick.Interval != want)
+                {
+                    tick.Interval = want;
+                    Native.SetFastTimer(SpectrumActive);
+                }
+                if (SpectrumActive) dirty = true;
+            }
 
             float v = mon.Visibility;
             int visQ = (int)(v * 128f + 0.5f);
@@ -343,7 +379,9 @@ namespace TileDesk
 
         private void Relayout()
         {
-            int w = ClientSize.Width, h = ClientSize.Height;
+            // 面板内部布局用面板自己的尺寸算，算完再整体偏移到长条里的位置。
+            int w = panelW > 0 ? panelW : ClientSize.Width;
+            int h = panelH > 0 ? panelH : ClientSize.Height;
             int pad = (int)Math.Round(3 * scale);
             int cover = h - pad * 2;
             rCover = new Rectangle(pad, pad, cover, cover);
@@ -369,6 +407,15 @@ namespace TileDesk
             rPrev = new Rectangle(bx, by, bw, bh);
             rPlay = new Rectangle(rPrev.Right + gap, by, bw, bh);
             rNext = new Rectangle(rPlay.Right + gap, by, bw, bh);
+
+            // 面板在长条里的偏移（长条比面板大一圈：左上各留一个 margin）
+            rCover.Offset(panelOffX, panelOffY);
+            rTitle.Offset(panelOffX, panelOffY);
+            rBar.Offset(panelOffX, panelOffY);
+            rTime.Offset(panelOffX, panelOffY);
+            rPrev.Offset(panelOffX, panelOffY);
+            rPlay.Offset(panelOffX, panelOffY);
+            rNext.Offset(panelOffX, panelOffY);
         }
 
         private void EnsureFonts()
@@ -540,13 +587,21 @@ namespace TileDesk
                     g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                     g.Clear(Color.Transparent);
 
+                    // 频谱先画（在面板底下），再由面板盖上去 —— 和原来"频谱画在墙上、
+                    // 播放器窗口浮在上面"的层次完全一致。
+                    if (SpectrumPainter != null)
+                    {
+                        try { SpectrumPainter(g, new Rectangle(0, 0, ClientSize.Width, ClientSize.Height)); }
+                        catch (Exception ex) { Config.Log("画频谱失败: " + ex.Message); }
+                    }
+
                     TextRenderingHint oldHint = g.TextRenderingHint;
                     g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
 
                     // 面板默认全透明；想加底板就把 npPanelOpacity 调大
                     if (cfg.npPanelOpacity > 0.01)
                     {
-                        Rectangle all = new Rectangle(0, 0, ClientSize.Width, ClientSize.Height);
+                        Rectangle all = new Rectangle(panelOffX, panelOffY, panelW, panelH);
                         using (GraphicsPath p = Round(all, Math.Max(4f, 14 * scale)))
                         using (SolidBrush b = new SolidBrush(Color.FromArgb(
                             (int)(cfg.npPanelOpacity * 235 * vis), 16, 18, 24)))

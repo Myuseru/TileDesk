@@ -128,7 +128,7 @@ namespace TileDesk
         private int lastTickMs = Environment.TickCount;
         private Point lastMouse = Point.Empty;
         private bool snapHover = false;
-        private bool spectrumOn;   // 本拍频谱是否在跑（影响 tick 频率）
+        // 频谱已搬进"底部长条"（播放器窗口），墙上不再需要频谱相关字段
         private int diagTickMs = 0;    // 上一拍的时刻（诊断卡顿用）
         private int lastUpX = int.MinValue, lastUpY = int.MinValue, lastUpW = 0, lastUpH = 0;   // 上次整窗上传的参数
         private int npRenderFrames = 0;
@@ -369,7 +369,7 @@ namespace TileDesk
             int y = ctrlRect.Bottom - h;   // ctrlRect 已含 bottomLift，信息条自动跟随
             if (cfg.showNowPlaying && npWindow != null && !npWindow.IsDisposed && npWindow.BarCenterY > 0)
             {
-                Point np = PointToClient(npWindow.Location);
+                Point np = PointToClient(npWindow.PanelScreenLocation);   // 面板（不是长条）的左上角
                 // 中线对齐播放器进度条，再整体下移 24 逻辑像素 —— 让时间文字的**底部**
                 // 和左边专辑封面的底部齐平（实测字底 2078、封面底 2126，差 48 物理像素）。
                 y = np.Y + npWindow.BarCenterY - h / 2 + (int)Math.Round(24 * scale);
@@ -591,8 +591,11 @@ namespace TileDesk
                 if (npWindow.Width > 0 && npWindow.Height > 0)
                 {
                     int m = cfg.npMargin;
-                    Rectangle np = new Rectangle(m, ClientSize.Height - m - npWindow.Height,
-                                                 npWindow.Width, npWindow.Height);
+                    // 用**面板**尺寸（不是窗口尺寸）：播放器窗口现在是"底部长条"，
+                    // 比面板大一整圈，拿窗口尺寸会把禁区算得过大、卡片白白让开一片。
+                    int pw = (int)Math.Round(cfg.npWidth * scale);
+                    int ph = (int)Math.Round(cfg.npHeight * scale);
+                    Rectangle np = new Rectangle(m, ClientSize.Height - m - ph, pw, ph);
                     np.Inflate(tol, tol);
                     list.Add(np);
                 }
@@ -2216,7 +2219,8 @@ namespace TileDesk
                     }
                     // 频谱放在绘制流程的最外层：原来它被包在一个条件块里，
                     // 某些状态下整段绘制会被跳过，频谱就"自己消失"了（用户实测）。
-                    DrawSpectrum(g);
+                    // 频谱不画在墙上了：它搬进了"底部长条"（播放器窗口），
+                    // 这样墙空闲淡出时卡片会隐藏，而频谱照常跳动。
                 }
             }
             catch (Exception ex) { Config.Log("渲染异常: " + ex.Message); }
@@ -2363,14 +2367,15 @@ namespace TileDesk
             catch { return false; }
         }
 
-        private void DrawSpectrum(Graphics g)
+        /// <summary>把频谱画进"底部长条"（由播放器窗口调用，坐标系是长条自己的）。</summary>
+        private void DrawSpectrumInto(Graphics g, Rectangle strip)
         {
-            if (!cfg.showSpectrum) { spectrumRect = Rectangle.Empty; return; }
+            if (!cfg.showSpectrum) return;
             int n = Math.Max(8, Math.Min(128, cfg.spectrumBars));
             float[] lv = AudioSpectrum.Bands(n);
-            if (lv == null || lv.Length != n) { spectrumRect = Rectangle.Empty; return; }
+            if (lv == null || lv.Length != n) return;
 
-            int wantW = Math.Max(64, (int)Math.Round(ClientSize.Width *
+            int wantW = Math.Max(64, (int)Math.Round(strip.Width *
                         Math.Max(0.1, Math.Min(1.0, cfg.spectrumWidth))));
             // ★ 全程用浮点算柱距，总跨度**恒等于 wantW**。
             //   原来先取整算柱宽、再取整算间隙，余数被截断；柱宽每变 1 像素，
@@ -2384,9 +2389,8 @@ namespace TileDesk
             int total = wantW;                             // 跨度固定，不再随柱宽变
             AudioSpectrum.FallSec = (float)Math.Max(0.02, cfg.spectrumFall);
             int maxH = Math.Max(20, (int)Math.Round(cfg.spectrumHeight * scale));
-            int baseline = ClientSize.Height;              // 贴着屏幕底部，不留空
-            int x0 = (ClientSize.Width - total) / 2;
-            spectrumRect = new Rectangle(x0 - 4, baseline - maxH - 4, total + 8, maxH + 8);
+            int baseline = strip.Height;                   // 贴长条底边 = 贴屏幕底边
+            int x0 = (strip.Width - total) / 2;
 
             for (int i = 0; i < n; i++)
             {
@@ -3170,9 +3174,11 @@ private Bitmap LoadArtCopyRaw(string path)
             // 停止绘制 —— 于是谁也不再更新频段值，Active 永远停在 false，墙再也醒不过来，
             // 频谱（以及整面墙）就永久消失了，直到用户动鼠标。
             if (cfg.showSpectrum) AudioSpectrum.Bands(Math.Max(8, Math.Min(128, cfg.spectrumBars)));
-            bool specActive = cfg.showSpectrum && AudioSpectrum.Ready && AudioSpectrum.Active;
-            fadeTarget = specActive ? 1 :
-                         ((cfg.idleHideSeconds > 0.1 && idleMs >= cfg.idleHideSeconds * 1000.0) ? 0 : 1);
+            // ★ 频谱不再拦住淡出：它已经搬进"底部长条"（独立的分层窗口），墙淡出不影响它。
+            //   以前这里是 fadeTarget = specActive ? 1 : … —— 那是为修"频谱消失"加的权宜之计，
+            //   代价就是"播歌时卡片永远不隐藏"（用户实测报的就是这条）。
+            fadeTarget =
+                ((cfg.idleHideSeconds > 0.1 && idleMs >= cfg.idleHideSeconds * 1000.0) ? 0 : 1);
             if (Math.Abs(fadeLevel - fadeTarget) > 0.001f)
             {
                 float step = dt / FadeSec;
@@ -3294,9 +3300,12 @@ private Bitmap LoadArtCopyRaw(string path)
             // 它自己画、自己上传，磁贴墙完全不参与它的渲染。
             if (npWindow != null)
             {
+                // 用**面板**高度定位（不是窗口高度）：窗口现在是底部长条，比面板高一圈，
+                // 用窗口高度会把面板整体顶上去（实测顶了 56 像素）。
                 Point npLoc = PointToScreen(new Point(
                     (int)Math.Round(cfg.npMargin * scale),
-                    ClientSize.Height - (int)Math.Round(cfg.npMargin * scale) - npWindow.Height));
+                    ClientSize.Height - (int)Math.Round(cfg.npMargin * scale) -
+                        (int)Math.Round(cfg.npHeight * scale)));
                 // 菜单开着时墙被临时提到 TOPMOST 画菜单，这时候控件**绝不能**再重申层级，
                 // 否则它会骑到菜单上面（用户实测：菜单底部被时钟/播放器盖住）。
                 // 两个浮层都不再自己动层级：`SetWindowPos(墙, 浮层)` 会把**墙**拖到浮层的高度，
@@ -3336,20 +3345,21 @@ private Bitmap LoadArtCopyRaw(string path)
                     try { Native.ReleaseCapture(); } catch { }
                 }
             }
-            // 频谱条：有声音时保持重绘（否则墙空闲会淡出，频谱就不动了）
-            // 被别的窗口完全盖住时不要再为频谱保持 60fps：
-            // 墙是桌面层窗口，它并不知道自己看不见，否则纯烧 CPU（用户实测问到这点）。
-            spectrumOn = false;
             bool covered = WallCovered();
-            bool specOn = cfg.showSpectrum && AudioSpectrum.Ready && AudioSpectrum.Active && !covered;
-            spectrumOn = specOn;   // 给下面的 tick 间隔判定用
+            // 频谱已经搬进"底部长条"（播放器窗口）：这里只告诉它有没有声音在放，
+            // 并把绘制函数注入给它（只在第一次）。
+            bool specPlaying = cfg.showSpectrum && AudioSpectrum.Ready && AudioSpectrum.Active && !covered;
+            if (npWindow != null && !npWindow.IsDisposed)
+            {
+                npWindow.SpectrumActive = specPlaying;
+                if (npWindow.SpectrumPainter == null)
+                    npWindow.SpectrumPainter = new Action<Graphics, Rectangle>(DrawSpectrumInto);
+            }
             // 频谱要跟音乐动，必须把系统计时器精度提到 1ms：
             // WM_TIMER 默认只有 ~15.6ms 粒度，墙实际只跑十几到几十 fps（这就是"采样率低"的真凶）
-            Native.SetFastTimer(specOn);
-            if (specOn)
+            Native.SetFastTimer(specPlaying);
+            if (specPlaying)
             {
-                if (!spectrumRect.IsEmpty) MarkDirty(spectrumRect);
-                else MarkDirtyAll();
                 Wake();
                 // 诊断：每 2 秒报一次状态和几根柱子的高度（只在详细日志开启时写）
                 if (tickCount % 128 == 0 && Config.Verbose)
@@ -3448,7 +3458,7 @@ private Bitmap LoadArtCopyRaw(string path)
             // 每个系统 tick 一帧（≈64fps）。淡出帧很便宜（只上传有内容的那一块）。
             // spectrumOn 必须算进来：频谱每帧都在变，但卡片是静止的，
             // 不算的话 tick 会被压回 120ms —— 频谱就只剩 ~8fps（用户实测："像帧率低"）。
-            bool animating = need || fadingThisTick || CachesIncomplete() || spectrumOn;
+            bool animating = need || fadingThisTick || CachesIncomplete();
             int want = animating ? 8 : 120;
             if (tick.Interval != want) tick.Interval = want;
         }
