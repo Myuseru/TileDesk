@@ -11,6 +11,6 @@ namespace TileDesk
     /// </summary>
     internal static class AppVersion
     {
-        public const string Text = "2.1.2.1";
+        public const string Text = "2.1.2.2";
     }
 }

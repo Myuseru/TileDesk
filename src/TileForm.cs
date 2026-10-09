@@ -430,25 +430,16 @@ namespace TileDesk
             // 最高的那个控件留白，旁边跟着一起浪费），不如把**整块网格往上顶**：
             // 只要顶部还有余量，就把上界留空压到"内容底边刚好停在控件上方"为止 ——
             // 顶部省多少、底部就能多用多少，既不重叠也能多塞卡。
-            int contentH = ContentHeight();
-            int topPad = padPx;
-            if (contentH > 0)
-            {
-                int obstacleTop = ClientSize.Height - ObstacleBandPx();
-                int wantTop = obstacleTop - (int)Math.Round(12 * scale) - contentH;
-                if (wantTop < topPad) topPad = Math.Max((int)Math.Round(8 * scale), wantTop);
-            }
-            // ★ 迟滞：gridTop 是**整墙的垂直原点**，它的微小变化会让所有卡片一起跳。
-            //   而 contentH 是由"卡片占了几行"算出来的 —— 用户拖动一张卡到更下面一行
-            //   就会让 contentH 变化，于是整墙上下抖一下（用户实测："重启后第一次拖动
-            //   会抖一下"、"只有我交互了才抖"，日志里两轮对比 gridTop 16 → 26）。
-            //   所以变化幅度小于 12px 时保持原值不动；只有真的需要重排才改。
-            int newTop = Math.Max(0, topPad);
-            int hyst = Math.Max(6, (int)Math.Round(6 * scale));
-            if (Math.Abs(newTop - gridTop) >= hyst) gridTop = newTop;
+            // ★ gridTop 只由视口决定，**不再看"卡片占了几行"**。
+            //   那是"重启后第一次交互整墙抖一下 / 拖动时整墙跳"的根因：
+            //   内容行数会随拖动变化（把一张卡拖到更下面一行就多一行），
+            //   用它算"上界留空" → 行数一变，所有卡片的垂直基准一起跳（一行 368 像素，
+            //   迟滞挡不住）。底部被播放器/右下按钮盖住的格子交给 NudgeCardsOutOfObstacles()
+            //   单独处理，不需要动整墙的基准。
+            gridTop = padPx;
             viewH = Math.Max(cardH, ClientSize.Height - gridTop - padPx);
 
-            int baseScroll = Math.Max(0, contentH - viewH);
+            int baseScroll = Math.Max(0, ContentHeight() - viewH);
             // 内容真的超过一屏时，再多给一段滚动余量（= 挡板高度）：
             // 挡板浮在视口上，靠这点余量才能把"最后一行"滚到它上方去。
             maxScroll = baseScroll > 0 ? baseScroll + ObstacleBandPx() : 0;
@@ -697,17 +688,29 @@ namespace TileDesk
                 if (c < 0 || c >= useCols || r < 0 || cellOwner.ContainsKey(CellKey(c, r))) { c = -1; r = -1; }
                 it.cellCol = c; it.cellRow = r;
             }
-            // 没位置（或位置被占了）的卡塞进最前面的空格子
+            // ① 先让**已有位置**的卡占位：配置里存的位置是权威的，新卡不能把老卡挤走。
+            //    原来这两件事混在一个循环里、又按字母序处理 —— 新卡（字母序靠前）
+            //    会先抢到空格子，反倒把老卡从自己的位置上顶掉。
+            for (int i = 0; i < n; i++)
+            {
+                TileItem it = snapshot[i];
+                if (it.cellCol < 0) continue;
+                // 撞车（两张卡同一个格子）时后处理的那张退回"找空格子" ——
+                // 不检查的话两张会叠着画，被盖住的那张完全看不见。
+                if (cellOwner.ContainsKey(CellKey(it.cellCol, it.cellRow)))
+                {
+                    it.cellCol = -1; it.cellRow = -1;
+                    continue;
+                }
+                cellCol[i] = it.cellCol; cellRow[i] = it.cellRow;
+                cellOwner[CellKey(cellCol[i], cellRow[i])] = i;
+            }
+            // ② 再给没位置的卡（新加的桌面图标）塞进最前面的空格子
             int scan = 0;
             for (int i = 0; i < n; i++)
             {
                 TileItem it = snapshot[i];
-                if (it.cellCol >= 0)
-                {
-                    cellCol[i] = it.cellCol; cellRow[i] = it.cellRow;
-                    cellOwner[CellKey(cellCol[i], cellRow[i])] = i;
-                    continue;
-                }
+                if (it.cellCol >= 0) continue;
                 while (true)
                 {
                     int c = scan % useCols, r = scan / useCols;
@@ -716,9 +719,28 @@ namespace TileDesk
                     cellCol[i] = c; cellRow[i] = r;
                     it.cellCol = c; it.cellRow = r;
                     cellOwner[CellKey(c, r)] = i;
+                    if (Config.Verbose) Config.Log("新卡落点: " + it.name + " → 第 " + (r + 1) + " 行第 " + (c + 1) + " 列");
                     break;
                 }
             }
+
+            // 诊断：把每张卡实际占的格子直接写成文件（绕开 Config.Log —— 它在启动早期会被丢掉）。
+            // 用来确认"新加的卡片到底落在哪一格、有没有和别人撞在同一格"。
+            try
+            {
+                System.Text.StringBuilder sb = new System.Text.StringBuilder();
+                for (int i = 0; i < n; i++)
+                {
+                    TileItem dit = snapshot[i];
+                    sb.AppendLine(dit.name + " | 列" + cellCol[i] + " 行" + cellRow[i] +
+                                  " | 屏幕(" + (gridLeft + cellCol[i] * (cardW + gapPx)) + "," +
+                                  (gridTop + cellRow[i] * (cardH + gapPx)) + ")" +
+                                  (cellCol[i] < 0 || cellRow[i] < 0 ? "  ★无效" : ""));
+                }
+                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TileDesk");
+                File.WriteAllText(Path.Combine(dir, "cards.txt"), sb.ToString(), Encoding.UTF8);
+            }
+            catch { }
         }
 
         /// <summary>把当下每张卡的位置写回配置（自由排列用）。</summary>
@@ -2779,6 +2801,12 @@ namespace TileDesk
                 {
                     TileItem it = new TileItem();
                     it.path = p;
+                    // ★ 必须显式初始化成 -1：TileItem 的格子字段默认是 0，
+                    //   那样新加的卡片看起来"已经有位置 (0,0)"，会跳过"找空格子"的逻辑，
+                    //   直接落到 (0,0) 和本来在那儿的卡撞在同一格 —— 两张叠着画，
+                    //   用户看到的就是"新加的图标没出现"（实测：DSH 酒馆 叠在吸血鬼幸存者上）。
+                    it.cellCol = -1;
+                    it.cellRow = -1;
                     it.name = Path.GetFileNameWithoutExtension(p);
                     if (Directory.Exists(p)) it.name = Path.GetFileName(p);
                     it.kind = KindOf(p);

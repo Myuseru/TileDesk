@@ -16,7 +16,7 @@
 * 自动读取桌面快捷方式，Steam 游戏自动配官方竖版封面（`library_600x900`）
 * 随时可还原：卸载时自动恢复原生桌面图标
 
-**版本 2.1.2.1** ｜ **运行环境**：Windows 10 1809 或更高（Windows 11 可用），需要 .NET Framework 4.x（系统自带）
+**版本 2.1.2.2** ｜ **运行环境**：Windows 10 1809 或更高（Windows 11 可用），需要 .NET Framework 4.x（系统自带）
 
 ![预览](preview.jpg)
 

@@ -23,7 +23,7 @@ using System.Runtime.InteropServices;
 // 2.0.0 = 第一个对外发测试的版本；1.x 是内部迭代（卡片布局与拖拽动画、播放器控件、
 // 右下角时钟天气、天气动画图标、定位与设置界面的修复都在其中）。
 // 2.0.3 = 修好"菜单被时钟/播放器浮层盖住"那一轮（当轮连调三次，按规则只占一个号）。
-[assembly: AssemblyVersion("2.1.2.1")]
-[assembly: AssemblyFileVersion("2.1.2.1")]
-[assembly: AssemblyInformationalVersion("2.1.2.1")]
+[assembly: AssemblyVersion("2.1.2.2")]
+[assembly: AssemblyFileVersion("2.1.2.2")]
+[assembly: AssemblyInformationalVersion("2.1.2.2")]
 [assembly: ComVisible(false)]
